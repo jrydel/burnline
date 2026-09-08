@@ -1,0 +1,65 @@
+/* Palette: signal #F1F0EC, slate #98A0AE, dim #6B7280,
+   hair rgba(235, 238, 245, 0.09), clay #D9825E, mint #74C6A4,
+   amber #E3A93F, ember #DE6B5E. */
+
+/* Top bar: mono digits so the layout cannot jitter from 9% to 10%. */
+.burnline-panel { spacing: 8px; }
+.burnline-panel-provider { spacing: 5px; }
+.burnline-panel-value { font-family: 'Adwaita Mono', monospace; font-size: 12px; color: #F1F0EC; }
+.burnline-panel-token { font-family: 'Adwaita Sans', sans-serif; font-size: 11px; color: #6B7280; }
+.burnline-panel-divider { width: 1px; height: 14px; background-color: rgba(235, 238, 245, 0.09); }
+.burnline-health-dot { width: 6px; height: 6px; border-radius: 3px; background-color: #E3A93F; }
+.burnline-provider-icon { -st-icon-style: symbolic; }
+
+/* Popup in the Quick Settings idiom: the shell's own blurred surface, with
+   raised rounded tiles on top of it. Blocks space themselves with margins,
+   so the container carries no spacing of its own. */
+.burnline-menu { border-radius: 20px; }
+.burnline-content { spacing: 0; min-width: 300px; padding: 1px 2px 2px; }
+.burnline-scroll { max-height: 650px; }
+.burnline-heading { spacing: 8px; margin: 2px 4px 10px; }
+.burnline-title { font-family: 'Adwaita Sans', sans-serif; font-size: 15px; font-weight: 700; color: #F1F0EC; }
+.burnline-pill { font-family: 'Adwaita Mono', monospace; font-size: 10px; color: #98A0AE; background-color: rgba(255, 255, 255, 0.08); border-radius: 100px; padding: 2px 9px; }
+.burnline-freshness { font-family: 'Adwaita Mono', monospace; font-size: 10px; color: #6B7280; }
+/* 28px content plus a 2px border makes the 32px circle; the border only
+   gains colour on focus, so the ring never shifts the layout. */
+.burnline-icon-button { width: 28px; height: 28px; border: 2px solid rgba(0, 0, 0, 0); border-radius: 16px; background-color: rgba(255, 255, 255, 0.08); color: #F1F0EC; }
+.burnline-icon-button:hover { background-color: rgba(255, 255, 255, 0.13); }
+.burnline-icon-button:active { background-color: rgba(255, 255, 255, 0.18); }
+.burnline-icon-button:focus { border: 2px solid #F1F0EC; }
+
+.burnline-card { background-color: rgba(255, 255, 255, 0.085); border-radius: 20px; padding: 12px 14px; margin-bottom: 8px; }
+.burnline-provider-heading { spacing: 10px; }
+.burnline-provider-name { font-family: 'Adwaita Sans', sans-serif; font-size: 13px; font-weight: bold; color: #98A0AE; }
+.burnline-account { font-family: 'Adwaita Sans', sans-serif; font-size: 10px; color: #6B7280; margin-top: 10px; }
+
+/* One three-column grid for every quota row: elastic label, then two fixed
+   columns whose right edges stay put no matter how the text changes. */
+.burnline-row { spacing: 8px; }
+.burnline-label-box { spacing: 6px; }
+.burnline-row-label { font-family: 'Adwaita Sans', sans-serif; font-size: 12px; color: #F1F0EC; }
+.burnline-tag { font-family: 'Adwaita Mono', monospace; font-size: 9px; color: #98A0AE; background-color: rgba(255, 255, 255, 0.08); border-radius: 100px; padding: 1px 7px; }
+.burnline-note { font-family: 'Adwaita Sans', sans-serif; font-size: 10px; color: #6B7280; }
+.burnline-reset { font-family: 'Adwaita Mono', monospace; font-size: 10px; color: #6B7280; width: 62px; text-align: right; }
+.burnline-value { font-family: 'Adwaita Mono', monospace; font-size: 14px; font-weight: bold; color: #F1F0EC; width: 46px; text-align: right; }
+.burnline-quota { spacing: 4px; margin-top: 10px; }
+/* 8px rail inside a 12px surface so the pace notch can overshoot it. */
+.burnline-track { height: 12px; }
+
+.burnline-caption { font-family: 'Adwaita Sans', sans-serif; font-size: 10px; color: #6B7280; padding: 0 6px; margin-bottom: 4px; }
+.burnline-footer { font-family: 'Adwaita Sans', sans-serif; font-size: 10px; color: #6B7280; padding: 0 6px; }
+
+.burnline-warning { color: #E3A93F; }
+.burnline-critical { color: #DE6B5E; }
+.burnline-unknown { color: #6B7280; }
+
+/* Indent the elastic label only: padding on the row itself would drag the
+   fixed columns off the shared alignment axis. */
+.burnline-model-row { margin-top: 6px; }
+.burnline-model-row .burnline-label-box { padding-left: 14px; }
+.burnline-model-row .burnline-row-label { font-size: 11px; color: #6B7280; }
+.burnline-model-row .burnline-value { font-size: 12px; color: #98A0AE; }
+/* Threshold hues outrank the muted model-row value colour. */
+.burnline-model-row .burnline-warning { color: #E3A93F; }
+.burnline-model-row .burnline-critical { color: #DE6B5E; }
+.burnline-model-row .burnline-unknown { color: #6B7280; }

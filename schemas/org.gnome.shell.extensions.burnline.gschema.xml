@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Jiří Rýdel <it@jrydel.cz>
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+<schemalist gettext-domain="burnline">
+  <schema id="org.gnome.shell.extensions.burnline" path="/org/gnome/shell/extensions/burnline/">
+    <key name="usage-command" type="s">
+      <default>'omp usage --json'</default>
+      <summary>Command that prints usage as JSON</summary>
+      <description>
+        Run on every refresh without a shell. Its standard input is empty and it inherits GNOME
+        Shell's environment, including PATH. It must print a JSON object of the form
+        {"reports": [...]} on standard output and exit 0; the report format is documented in
+        Burnline's README. The first word is looked up on PATH, or used as an absolute path to an
+        executable.
+      </description>
+    </key>
+    <key name="refresh-interval" type="i">
+      <default>60</default>
+      <range min="15" max="3600"/>
+      <summary>Seconds between refreshes</summary>
+      <description>
+        How often the usage command is run. Values are also marked stale when they are older than
+        eight minutes or twice this interval, whichever is longer.
+      </description>
+    </key>
+  </schema>
+</schemalist>
