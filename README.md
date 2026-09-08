@@ -4,6 +4,8 @@ GNOME Shell extension that shows how much of your Claude and OpenAI Codex quota 
 
 ![Burnline popup](docs/screenshot.png)
 
+<sub>In context: [full desktop shot](docs/screenshot-desktop.png).</sub>
+
 Verified on GNOME Shell 50.4 on Fedora. Nothing else has been tried.
 
 ## The pace notch
