@@ -43,7 +43,11 @@ Open the dialog with `gnome-extensions prefs burnline@jrydel.cz`. Two keys, unde
 | `usage-command` | string | `omp usage --json` | any command line |
 | `refresh-interval` | int | `60` | 15 to 3600 seconds |
 
-The command line is split into words without a shell; the first word is looked up on `PATH` or used as the path of an executable file. It runs with GNOME Shell's environment, gets 35 seconds to answer, and must exit 0. Editing the command re-runs it a second after you stop typing. On a failure the last good values stay on screen marked stale, and the popup footer says why. Values are also marked stale once they are older than eight minutes or twice the refresh interval, whichever is longer.
+The command line is split into words without a shell; the first word is looked up on `PATH` or used as the path of an executable file. It runs with GNOME Shell's environment, gets 35 seconds to answer, and must exit 0. Editing the command re-runs it a second after you stop typing. On a failure the last good values stay on screen marked stale, and the popup footer says why. Values are also marked stale once they are older than eight minutes or twice the current refresh delay, whichever is longer.
+
+`refresh-interval` is the base cadence. When the command fails, or a provider comes back with no numbers (Anthropic's usage endpoint answers `429 Too Many Requests` when polled too often from one IP), the delay doubles up to 30 minutes; the first complete answer drops it back to the base. The refresh button always checks immediately.
+
+A provider that returns no numbers keeps its last known ones, labelled `as of HH:MM` in its card. With the default `omp usage` command, Burnline also reads `omp usage --history --json --days 7` and uses the newest snapshot any omp process recorded, so the numbers survive a Shell restart.
 
 The **Test command** button runs the configured command once, exactly as the panel does, and writes the outcome into the row: `Returned N limits across M providers` on success, where N counts every limit whose window could be resolved and M the providers that returned at least one report. Otherwise it shows the same reason the popup footer reports, with the first line of stderr appended on a non-zero exit: `not a valid command line`, `command not found`, `exited 1: <first line of stderr>`, `killed by signal N`, `invalid JSON`, `no reports array`, or `no answer in 35s`.
 
