@@ -10,26 +10,31 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import {PROVIDERS, STALE_MS, REQUEST_TIMEOUT_SECONDS, resolveCommand, exitReason, parseUsage, normalizeUsage, remainingPercent, remainingText, countdown, freshness, threshold, paceFraction} from './usage.js';
+import {PROVIDERS, STALE_MS, REQUEST_TIMEOUT_SECONDS, resolveCommand, exitReason, parseUsage, normalizeUsage, historyCommand, historyReports, hasUsage, fetchedAtOf, remainingPercent, remainingText, countdown, freshness, threshold, paceFraction} from './usage.js';
 
 const COUNTDOWN_SECONDS = 15;
 // The preferences entry writes the command on every keystroke; let the line
 // settle before launching it.
 const SETTLE_MS = 1000;
+// Ceiling for the backed-off refresh. Provider usage endpoints throttle per
+// source IP, so a refused check doubles the wait up to this, and the first
+// complete answer drops it back to the configured interval.
+const MAX_BACKOFF_SECONDS = 1800;
 // Continuous rounded rail in the Quick Settings slider idiom: 8px inside a
 // 12px surface so the pace notch can overshoot it top and bottom.
 const RAIL_HEIGHT = 8;
 // Notch suppressed this close to either end, where it would read as a broken
 // rail cap rather than a mark on the window.
 const NOTCH_MARGIN = 7;
-const TRACK = [1, 1, 1, 0.10];
-const PACE = [0.9451, 0.9412, 0.9255, 0.55];
-const AMBER = '#E3A93F';
-const EMBER = '#DE6B5E';
+const TRACK = [1, 1, 1, 0.14];
+const PACE = [0.9569, 0.9569, 0.9647, 0.65];
+const AMBER = '#F2B84A';
+const EMBER = '#EC766E';
 const rgb = hex => [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16) / 255);
 const label = (text, style = '', extra = {}) => new St.Label({text, style_class: style, y_align: Clutter.ActorAlign.CENTER, ...extra});
 const box = (vertical = false, style = '', extra = {}) => new St.BoxLayout({orientation: vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL, style_class: style, ...extra});
-const everyText = seconds => seconds === 3600 ? 'every hour' : seconds === 60 ? 'every minute' : seconds % 60 ? `every ${seconds}s` : `every ${seconds / 60} minutes`;
+const afterText = seconds => seconds < 60 ? `in ${seconds}s` : `in ${Math.round(seconds / 60)} min`;
+const clockText = ms => GLib.DateTime.new_from_unix_local(Math.floor(ms / 1000)).format('%H:%M');
 const roundedRect = (cr, x, y, w, h, r) => {
     cr.newSubPath();
     cr.arc(x + w - r, y + r, r, -Math.PI / 2, 0);
@@ -46,17 +51,25 @@ export default class Burnline extends Extension {
         this._data = normalizeUsage({reports: []});
         this._error = false;
         this._loaded = false;
+        this._busy = false;
         this._process = null;
         this._cancellable = null;
         this._requestTimeout = 0;
         this._settleTimer = 0;
+        this._refreshTimer = 0;
         this._rows = [];
         this._panelValues = [];
+        // Last numbers each provider actually reported, so a refused check
+        // shows them with their age instead of blanking the row.
+        this._lastGood = new Map();
+        this._refused = [];
         this._settings = this.getSettings();
+        this._delay = this._settings.get_int('refresh-interval');
         this._settingsHandlers = [
             this._settings.connect('changed::usage-command', () => this._scheduleFetch()),
             this._settings.connect('changed::refresh-interval', () => {
-                this._startRefreshTimer();
+                this._delay = this._settings.get_int('refresh-interval');
+                this._scheduleNext();
                 this._scheduleFetch();
             }),
         ];
@@ -89,7 +102,7 @@ export default class Burnline extends Extension {
         });
         Main.panel.addToStatusArea(this.uuid, this._indicator, 0, 'right');
         this._render();
-        this._startRefreshTimer();
+        this._scheduleNext();
         this._clockTimer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, COUNTDOWN_SECONDS, () => {
             this._updateClocks();
             return GLib.SOURCE_CONTINUE;
@@ -107,12 +120,23 @@ export default class Burnline extends Extension {
         });
     }
 
-    _startRefreshTimer() {
+    // One-shot, re-armed after every fetch with the current (possibly backed
+    // off) delay, so the cadence follows how the providers are answering.
+    _scheduleNext() {
         if (this._refreshTimer) GLib.Source.remove(this._refreshTimer);
-        this._refreshTimer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, this._settings.get_int('refresh-interval'), () => {
+        this._refreshTimer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, this._delay, () => {
+            this._refreshTimer = 0;
             this._fetchUsage();
-            return GLib.SOURCE_CONTINUE;
+            return GLib.SOURCE_REMOVE;
         });
+    }
+
+    // A refused or failed check doubles the wait up to the ceiling; a complete
+    // answer returns to the configured interval.
+    _backoff(refused) {
+        const base = this._settings.get_int('refresh-interval');
+        this._delay = refused ? Math.min(Math.max(this._delay * 2, base), Math.max(base, MAX_BACKOFF_SECONDS)) : base;
+        this._scheduleNext();
     }
 
     // A settings change: once the line settles, drop any fetch of the old
@@ -131,6 +155,7 @@ export default class Burnline extends Extension {
     // never lands after the command that produced it is gone.
     _abortFetch() {
         this._generation++;
+        this._busy = false;
         if (this._requestTimeout) GLib.Source.remove(this._requestTimeout);
         this._requestTimeout = 0;
         this._cancellable?.cancel();
@@ -139,8 +164,45 @@ export default class Burnline extends Extension {
         this._process = null;
     }
 
-    _fetchUsage() {
-        if (!this._active || this._process) return;
+    // Runs one command to completion and resolves with its stdout. No shell:
+    // argv is launched as resolved.
+    _run(argv) {
+        return new Promise((resolve, reject) => {
+            const cancellable = new Gio.Cancellable();
+            const process = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+            this._process = process;
+            this._cancellable = cancellable;
+            let timedOut = false;
+            this._requestTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, REQUEST_TIMEOUT_SECONDS, () => {
+                this._requestTimeout = 0;
+                timedOut = true;
+                cancellable.cancel();
+                process.force_exit();
+                return GLib.SOURCE_REMOVE;
+            });
+            process.communicate_utf8_async(null, cancellable, (proc, result) => {
+                if (this._requestTimeout && this._process === process) {
+                    GLib.Source.remove(this._requestTimeout);
+                    this._requestTimeout = 0;
+                }
+                if (this._process === process) {
+                    this._process = null;
+                    this._cancellable = null;
+                }
+                try {
+                    const [, stdout] = proc.communicate_utf8_finish(result);
+                    const reason = exitReason(proc);
+                    if (reason) throw new Error(reason);
+                    resolve(stdout);
+                } catch (error) {
+                    reject(timedOut ? new Error(`no answer in ${REQUEST_TIMEOUT_SECONDS}s`) : error);
+                }
+            });
+        });
+    }
+
+    async _fetchUsage() {
+        if (!this._active || this._busy) return;
         let argv;
         try {
             argv = resolveCommand(this._settings.get_string('usage-command'));
@@ -149,57 +211,61 @@ export default class Burnline extends Extension {
             this._errorMessage = error.code === 'missing'
                 ? `Can't run ${error.program}. Set the usage command in Burnline's settings.`
                 : "Usage command is not valid. Check Burnline's settings.";
+            this._backoff(true);
             this._render();
             return;
         }
         const generation = this._generation;
+        const current = () => this._active && this._generation === generation;
+        this._busy = true;
+        let failure = null;
+        let refused = false;
         try {
-            this._cancellable = new Gio.Cancellable();
-            // No shell and no token access: the command prints the usage JSON
-            // documented in the README, and nothing else of it is read.
-            const process = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
-            this._process = process;
-            this._requestTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, REQUEST_TIMEOUT_SECONDS, () => {
-                this._requestTimeout = 0;
-                this._cancellable?.cancel();
-                process.force_exit();
-                return GLib.SOURCE_REMOVE;
-            });
-            process.communicate_utf8_async(null, this._cancellable, (proc, result) => {
-                if (!this._active || this._generation !== generation) return;
-                // The timeout zeroes its own id before cancelling, so a zero
-                // here means it fired.
-                const timedOut = !this._requestTimeout;
-                if (this._requestTimeout) GLib.Source.remove(this._requestTimeout);
-                this._requestTimeout = 0;
-                try {
-                    const [, stdout] = proc.communicate_utf8_finish(result);
-                    const reason = exitReason(proc);
-                    if (reason) throw new Error(reason);
-                    this._data = parseUsage(stdout);
-                    this._loaded = true;
-                    this._error = false;
-                    this._lastSuccess = Date.now();
-                } catch (error) {
-                    // Keep the last successful values, visibly marked as stale.
-                    this._fail(timedOut ? `no answer in ${REQUEST_TIMEOUT_SECONDS}s` : error.message);
-                } finally {
-                    this._process = null;
-                    this._cancellable = null;
-                    this._render();
+            const live = parseUsage(await this._run(argv));
+            if (!current()) return;
+            for (const provider of live) if (hasUsage(provider)) this._lastGood.set(provider.id, provider);
+            this._refused = live.filter(provider => !hasUsage(provider)).map(provider => provider.id);
+            refused = this._refused.length > 0;
+            if (refused) await this._recoverFromHistory(argv);
+            if (!current()) return;
+            this._data = live.map(provider => hasUsage(provider) ? provider : this._lastGood.get(provider.id) ?? provider);
+            this._loaded = true;
+            this._error = false;
+            this._lastSuccess = Date.now();
+        } catch (error) {
+            if (!current()) return;
+            // Keep the last successful values, visibly marked as stale.
+            failure = error.message;
+            refused = true;
+        } finally {
+            if (current()) {
+                this._busy = false;
+                this._backoff(refused);
+                if (failure) {
+                    this._error = true;
+                    this._errorMessage = `Usage command failed: ${failure}. Retrying ${afterText(this._delay)}.`;
                 }
-            });
-        } catch (_error) {
-            this._process = null;
-            this._cancellable = null;
-            this._fail("didn't start");
-            this._render();
+                this._render();
+            }
         }
     }
 
-    _fail(reason) {
-        this._error = true;
-        this._errorMessage = `Usage command failed: ${reason}. Retrying ${everyText(this._settings.get_int('refresh-interval'))}.`;
+    // A provider that answered nothing gets its newest snapshot from the
+    // command's own history, when it keeps one. Never replaces newer numbers
+    // already held, and a failed lookup leaves the row as it was.
+    async _recoverFromHistory(argv) {
+        const command = historyCommand(argv);
+        if (!command) return;
+        try {
+            const recovered = normalizeUsage({reports: historyReports(JSON.parse(await this._run(command)))});
+            for (const provider of recovered) {
+                if (!this._refused.includes(provider.id) || !hasUsage(provider)) continue;
+                const held = this._lastGood.get(provider.id);
+                if (!held || (fetchedAtOf(provider) ?? 0) > (fetchedAtOf(held) ?? 0)) this._lastGood.set(provider.id, provider);
+            }
+        } catch (_error) {
+            // History is a fallback; its absence is not a fault to report.
+        }
     }
 
     // One grid for every quota row: elastic label, then two fixed columns whose
@@ -315,7 +381,9 @@ export default class Burnline extends Extension {
             const providerHeading = box(false, 'burnline-provider-heading');
             providerHeading.add_child(this._icon(provider, 18));
             providerHeading.add_child(label(provider.name, 'burnline-provider-name'));
-            if (provider.accounts.length > 1) providerHeading.add_child(label(`${provider.accounts.length} accounts`, 'burnline-note', {x_expand: true, x_align: Clutter.ActorAlign.END}));
+            const asOf = this._refused.includes(provider.id) ? fetchedAtOf(provider) : null;
+            if (asOf) providerHeading.add_child(label(`as of ${clockText(asOf)}`, 'burnline-note', {x_expand: true, x_align: Clutter.ActorAlign.END}));
+            else if (provider.accounts.length > 1) providerHeading.add_child(label(`${provider.accounts.length} accounts`, 'burnline-note', {x_expand: true, x_align: Clutter.ActorAlign.END}));
             card.add_child(providerHeading);
             const accounts = provider.accounts.length ? provider.accounts : [{limits: []}];
             accounts.forEach((account, accountIndex) => {
@@ -354,24 +422,27 @@ export default class Burnline extends Extension {
             this._describeRow(entry);
             entry.meter?.queue_repaint();
         }
-        const interval = this._settings.get_int('refresh-interval');
-        // A slow refresh must not read as stale data between two refreshes.
-        const staleMs = Math.max(STALE_MS, 2 * interval * 1000);
+        // A slow or backed-off refresh must not read as stale data between
+        // two refreshes.
+        const staleMs = Math.max(STALE_MS, 2 * this._delay * 1000);
         const reports = this._data.flatMap(provider => provider.accounts);
         const stale = this._error || reports.some(account => freshness(account.fetchedAt, now, staleMs));
-        const empty = this._loaded ? this._data.filter(provider => !provider.accounts.some(account => account.limits.some(limit => limit.percent !== null))) : [];
+        const empty = this._loaded ? this._data.filter(provider => !hasUsage(provider)) : [];
+        const held = this._data.filter(provider => this._refused.includes(provider.id) && hasUsage(provider));
         const fetched = reports.map(account => account.fetchedAt).filter(value => typeof value === 'number' && Number.isFinite(value));
         const lastUpdated = fetched.length ? Math.min(...fetched) : this._lastSuccess;
         const elapsed = lastUpdated ? Math.max(0, Math.floor((now - lastUpdated) / 60000)) : null;
         this._freshnessLabel.text = !this._loaded ? (this._error ? 'Unavailable' : 'Loading…') : stale ? 'Stale' : elapsed ? `Updated ${elapsed}m ago` : 'Updated just now';
+        const next = afterText(this._delay);
         // One footer line: a fault when there is one, else the legend for the
         // notch every meter carries.
         this._footerLabel.text = this._error ? this._errorMessage
-            : stale ? `Values older than ${Math.round(staleMs / 60000)} minutes. Refreshing ${everyText(interval)}.`
-            : empty.length ? `No usage returned for ${empty[0].name}. Check its sign-in.`
+            : held.length ? `${held[0].name} didn't answer the last check. Showing its numbers from ${clockText(fetchedAtOf(held[0]))}; next check ${next}.`
+            : empty.length ? `No usage returned for ${empty[0].name}. Next check ${next}.`
+            : stale ? `Values older than ${Math.round(staleMs / 60000)} minutes. Next check ${next}.`
             : 'Notch marks even pace through the window.';
-        this._health.visible = stale || empty.length > 0;
-        this._health.accessible_name = this._error ? this._errorMessage : stale ? 'Usage values are stale' : empty.length ? `No usage returned for ${empty[0].name}` : '';
+        this._health.visible = stale || empty.length > 0 || held.length > 0;
+        this._health.accessible_name = this._error ? this._errorMessage : held.length ? `${held[0].name} usage is from ${clockText(fetchedAtOf(held[0]))}` : stale ? 'Usage values are stale' : empty.length ? `No usage returned for ${empty[0].name}` : '';
         this._indicator.accessible_name = `AI usage. ${this._data.map(provider => `${provider.name}: five-hour ${remainingText(provider.fiveHour?.percent)} left, weekly ${remainingText(provider.weekly?.percent)} left`).join('. ')}${stale ? '. Data stale.' : ''}`;
     }
 
@@ -389,5 +460,7 @@ export default class Burnline extends Extension {
         this._panelValues = [];
         this._data = null;
         this._lastSuccess = null;
+        this._lastGood = null;
+        this._refused = [];
     }
 }
